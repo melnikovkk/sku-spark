@@ -1,14 +1,216 @@
-// Update this page (the content is just a fallback if you fail to update the page)
+import { useState, useCallback } from "react";
+import { Header } from "@/components/Header";
+import { CreateJobForm } from "@/components/dashboard/CreateJobForm";
+import { JobFilters } from "@/components/dashboard/JobFilters";
+import { JobTable } from "@/components/dashboard/JobTable";
+import { BudgetWidget } from "@/components/dashboard/BudgetWidget";
+import { AgentChatStream } from "@/components/workspace/AgentChatStream";
+import { SKUCard } from "@/components/workspace/SKUCard";
+import { WorkspaceToolbar } from "@/components/workspace/WorkspaceToolbar";
+import { EvidenceDrawer } from "@/components/workspace/EvidenceDrawer";
+import { useMockData } from "@/hooks/useMockData";
+import type { JobStatus } from "@/types/job";
+import { ArrowLeft } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { toast } from "sonner";
 
-const Index = () => {
+export default function Index() {
+  const [activeView, setActiveView] = useState<'dashboard' | 'workspace' | 'audit' | 'config'>('dashboard');
+  const [activeFilter, setActiveFilter] = useState<JobStatus | 'all'>('all');
+  const [evidenceDrawer, setEvidenceDrawer] = useState<{ isOpen: boolean; fieldName: string }>({
+    isOpen: false,
+    fieldName: '',
+  });
+  const [isPaused, setIsPaused] = useState(false);
+
+  const {
+    jobs,
+    selectedJob,
+    agentMessages,
+    skuData,
+    budgetData,
+    isProcessing,
+    selectJob,
+    createJob,
+    getEvidence,
+    getFilterCounts,
+    setSkuData,
+  } = useMockData();
+
+  const filteredJobs = activeFilter === 'all' 
+    ? jobs 
+    : jobs.filter(job => job.status === activeFilter);
+
+  const handleSelectJob = useCallback((job: typeof jobs[0]) => {
+    selectJob(job);
+    setActiveView('workspace');
+  }, [selectJob]);
+
+  const handleViewEvidence = useCallback((fieldName: string) => {
+    setEvidenceDrawer({ isOpen: true, fieldName });
+  }, []);
+
+  const handleToggleLock = useCallback((fieldName: string) => {
+    if (!skuData) return;
+    
+    const field = skuData[fieldName as keyof typeof skuData];
+    const isCurrentlyLocked = typeof field === 'object' && field !== null && 'status' in field && field.status === 'locked';
+    
+    setSkuData(prev => {
+      if (!prev) return prev;
+      const f = prev[fieldName as keyof typeof prev];
+      if (typeof f === 'object' && f !== null && 'status' in f) {
+        return {
+          ...prev,
+          [fieldName]: {
+            ...f,
+            status: f.status === 'locked' ? 'verified' : 'locked',
+          },
+        };
+      }
+      return prev;
+    });
+    
+    toast.success(`Field ${fieldName} ${isCurrentlyLocked ? 'unlocked' : 'locked'}`);
+  }, [skuData, setSkuData]);
+
+  const handleDecision = useCallback((messageId: string, decision: string) => {
+    toast.success(`Decision: ${decision} for message ${messageId}`);
+  }, []);
+
+  const handleVerifyHash = useCallback((evidenceId: string) => {
+    toast.info('Verifying hash against live source...');
+    setTimeout(() => {
+      toast.success('Hash verified - content unchanged');
+    }, 1500);
+  }, []);
+
+  const handleBulkUpload = useCallback(() => {
+    toast.info('CSV upload dialog would open here');
+  }, []);
+
+  const handlePause = useCallback(() => {
+    setIsPaused(prev => !prev);
+    toast.info(isPaused ? 'Job resumed' : 'Job paused');
+  }, [isPaused]);
+
+  const handleStop = useCallback(() => {
+    toast.warning('Job stopped');
+    setActiveView('dashboard');
+  }, []);
+
   return (
-    <div className="flex min-h-screen items-center justify-center bg-background">
-      <div className="text-center">
-        <h1 className="mb-4 text-4xl font-bold">Welcome to Your Blank App</h1>
-        <p className="text-xl text-muted-foreground">Start building your amazing project here!</p>
-      </div>
+    <div className="min-h-screen bg-background">
+      <Header activeView={activeView} onViewChange={setActiveView} />
+      
+      <main className="h-[calc(100vh-3.5rem)]">
+        {activeView === 'dashboard' && (
+          <div className="p-6 space-y-6 max-w-7xl mx-auto">
+            {/* Create Job Form */}
+            <CreateJobForm onCreateJob={createJob} onBulkUpload={handleBulkUpload} />
+
+            {/* Dashboard Grid */}
+            <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
+              {/* Job List - Takes 3 columns */}
+              <div className="lg:col-span-3 space-y-4">
+                <JobFilters
+                  activeFilter={activeFilter}
+                  onFilterChange={setActiveFilter}
+                  counts={getFilterCounts()}
+                />
+                <JobTable
+                  jobs={filteredJobs}
+                  onSelectJob={handleSelectJob}
+                  selectedJobId={selectedJob?.id}
+                />
+              </div>
+
+              {/* Budget Widget - Takes 1 column */}
+              <div className="lg:col-span-1">
+                <BudgetWidget data={budgetData} />
+              </div>
+            </div>
+          </div>
+        )}
+
+        {activeView === 'workspace' && selectedJob && skuData && (
+          <div className="h-full flex flex-col">
+            {/* Workspace Toolbar */}
+            <div className="p-4 border-b bg-muted/30">
+              <div className="flex items-center gap-4 max-w-7xl mx-auto">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setActiveView('dashboard')}
+                  className="gap-2"
+                >
+                  <ArrowLeft className="w-4 h-4" />
+                  Back
+                </Button>
+                <div className="flex-1">
+                  <WorkspaceToolbar
+                    cost={selectedJob.cost}
+                    costLimit={0.5}
+                    duration={selectedJob.duration}
+                    durationLimit={600}
+                    onPause={handlePause}
+                    onStop={handleStop}
+                    isPaused={isPaused}
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* Split Screen */}
+            <div className="flex-1 flex overflow-hidden">
+              {/* Left Panel - Agent Chat (60%) */}
+              <div className="w-[60%] border-r overflow-hidden">
+                <AgentChatStream
+                  messages={agentMessages}
+                  onDecision={handleDecision}
+                  isProcessing={isProcessing && !isPaused}
+                />
+              </div>
+
+              {/* Right Panel - SKU Card (40%) */}
+              <div className="w-[40%] overflow-auto p-4 bg-muted/20">
+                <SKUCard
+                  data={skuData}
+                  onViewEvidence={handleViewEvidence}
+                  onToggleLock={handleToggleLock}
+                />
+              </div>
+            </div>
+
+            {/* Evidence Drawer */}
+            <EvidenceDrawer
+              isOpen={evidenceDrawer.isOpen}
+              onClose={() => setEvidenceDrawer({ isOpen: false, fieldName: '' })}
+              fieldName={evidenceDrawer.fieldName}
+              evidence={getEvidence(evidenceDrawer.fieldName)}
+              onVerifyHash={handleVerifyHash}
+            />
+          </div>
+        )}
+
+        {activeView === 'audit' && (
+          <div className="p-6 max-w-7xl mx-auto">
+            <div className="text-center py-16 text-muted-foreground">
+              <h2 className="text-xl font-semibold mb-2">Audit Log</h2>
+              <p>Comprehensive activity log coming soon...</p>
+            </div>
+          </div>
+        )}
+
+        {activeView === 'config' && (
+          <div className="p-6 max-w-7xl mx-auto">
+            <div className="text-center py-16 text-muted-foreground">
+              <h2 className="text-xl font-semibold mb-2">System Configuration</h2>
+              <p>Agent policies, budget caps, and LLM provider settings coming soon...</p>
+            </div>
+          </div>
+        )}
+      </main>
     </div>
   );
-};
-
-export default Index;
+}
