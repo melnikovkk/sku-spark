@@ -1,5 +1,7 @@
 import { useState, useCallback, useEffect } from 'react';
-import type { Job, AgentMessage, SKUData, Evidence, BudgetData, JobStatus } from '@/types/job';
+import type { Job, AgentMessage, SKUData, Evidence, BudgetData, JobStatus, ConflictData } from '@/types/job';
+import type { AuditEntry } from '@/components/audit/AuditLogView';
+import type { SystemConfig } from '@/components/config/ConfigurationPanel';
 
 // Mock data generators
 const createMockSKUData = (jobId: string): SKUData => ({
@@ -157,12 +159,137 @@ const mockAgentMessages: AgentMessage[] = [
   },
 ];
 
+const mockAuditEntries: AuditEntry[] = [
+  {
+    id: 'audit-1',
+    timestamp: new Date(Date.now() - 1800000),
+    action: 'agent_update',
+    fieldName: 'mpn',
+    beforeValue: null,
+    afterValue: 'CE285A',
+    source: 'hp.com/products/ce285a',
+    jobId: 'job-001',
+  },
+  {
+    id: 'audit-2',
+    timestamp: new Date(Date.now() - 1700000),
+    action: 'agent_update',
+    fieldName: 'brand',
+    beforeValue: null,
+    afterValue: 'HP',
+    source: 'hp.com/products/ce285a',
+    jobId: 'job-001',
+  },
+  {
+    id: 'audit-3',
+    timestamp: new Date(Date.now() - 1600000),
+    action: 'conflict_resolution',
+    fieldName: 'dimensions',
+    beforeValue: '12.8 x 4.0 x 5.5 cm',
+    afterValue: '12.5 x 3.8 x 5.2 cm',
+    reasoning: 'Selected official HP source over Amazon listing',
+    userId: 'user-123',
+    jobId: 'job-001',
+  },
+  {
+    id: 'audit-4',
+    timestamp: new Date(Date.now() - 1500000),
+    action: 'field_lock',
+    fieldName: 'mpn',
+    beforeValue: 'CE285A',
+    afterValue: 'CE285A',
+    userId: 'user-123',
+    jobId: 'job-001',
+  },
+  {
+    id: 'audit-5',
+    timestamp: new Date(Date.now() - 86400000),
+    action: 'manual_override',
+    fieldName: 'yield',
+    beforeValue: '1500 pages',
+    afterValue: '1600 pages',
+    reasoning: 'Updated based on manufacturer spec sheet',
+    userId: 'user-123',
+    jobId: 'job-002',
+  },
+  {
+    id: 'audit-6',
+    timestamp: new Date(Date.now() - 86300000),
+    action: 'agent_update',
+    fieldName: 'weight',
+    beforeValue: null,
+    afterValue: '0.45 kg',
+    source: 'amazon.com/dp/B003X7XQRU',
+    jobId: 'job-002',
+  },
+];
+
+const mockValidationBlockers = [
+  {
+    id: 'blocker-1',
+    channel: 'ozon' as const,
+    severity: 'critical' as const,
+    message: 'Hero image requires white background',
+    field: 'heroImage',
+    canAutoFix: true,
+  },
+  {
+    id: 'blocker-2',
+    channel: 'ozon' as const,
+    severity: 'warning' as const,
+    message: 'Package dimensions not in required format',
+    field: 'dimensions',
+    canAutoFix: false,
+  },
+  {
+    id: 'blocker-3',
+    channel: 'wildberries' as const,
+    severity: 'critical' as const,
+    message: 'TNVED code is required for this category',
+    field: 'tnvedCode',
+    canAutoFix: true,
+  },
+  {
+    id: 'blocker-4',
+    channel: 'wildberries' as const,
+    severity: 'warning' as const,
+    message: 'Package weight should be specified in grams',
+    field: 'weight',
+    canAutoFix: false,
+  },
+];
+
+const defaultSystemConfig: SystemConfig = {
+  sourcePriorities: [
+    { id: '1', name: 'Official Manufacturer Sites', type: 'official', priority: 1, enabled: true },
+    { id: '2', name: 'PDF Datasheets', type: 'datasheet', priority: 2, enabled: true },
+    { id: '3', name: 'Marketplace Listings', type: 'marketplace', priority: 3, enabled: true },
+    { id: '4', name: 'Forum Discussions', type: 'forum', priority: 4, enabled: true },
+  ],
+  budgetCaps: {
+    maxSpendPerSKU: 0.50,
+    maxTokensPerSKU: 50000,
+    maxExecutionTime: 600,
+    globalDailyBudget: 50.00,
+  },
+  llmSettings: {
+    orchestratorModel: 'claude-sonnet-4-5',
+    subAgentModel: 'gemini-2.5-flash',
+    enableStreaming: true,
+    temperature: 0.3,
+  },
+};
+
 export function useMockData() {
   const [jobs, setJobs] = useState<Job[]>(mockJobs);
   const [selectedJob, setSelectedJob] = useState<Job | null>(null);
   const [agentMessages, setAgentMessages] = useState<AgentMessage[]>([]);
   const [skuData, setSkuData] = useState<SKUData | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [auditEntries, setAuditEntries] = useState<AuditEntry[]>(mockAuditEntries);
+  const [systemConfig, setSystemConfig] = useState<SystemConfig>(defaultSystemConfig);
+  const [validationBlockers, setValidationBlockers] = useState(mockValidationBlockers);
+  const [activeConflict, setActiveConflict] = useState<ConflictData | null>(null);
 
   const budgetData: BudgetData = {
     tokenUsage: jobs.reduce((sum, j) => sum + j.tokenUsage, 0),
@@ -225,6 +352,67 @@ export function useMockData() {
     return counts;
   }, [jobs]);
 
+  const triggerConflict = useCallback((fieldName: string) => {
+    setActiveConflict({
+      fieldName,
+      claims: [
+        { value: '12.5 x 3.8 x 5.2 cm', sourceUrl: 'https://hp.com/specs', confidence: 92, sourceType: 'Official' },
+        { value: '12.8 x 4.0 x 5.5 cm', sourceUrl: 'https://amazon.com/dp/123', confidence: 78, sourceType: 'Marketplace' },
+      ],
+    });
+  }, []);
+
+  const resolveConflict = useCallback((resolution: { fieldName: string; selectedValue: string; source: string; reasoning?: string }) => {
+    // Add to audit log
+    const newAuditEntry: AuditEntry = {
+      id: `audit-${Date.now()}`,
+      timestamp: new Date(),
+      action: 'conflict_resolution',
+      fieldName: resolution.fieldName,
+      beforeValue: activeConflict?.claims[1]?.value || null,
+      afterValue: resolution.selectedValue,
+      reasoning: resolution.reasoning,
+      userId: 'current-user',
+      jobId: selectedJob?.id || 'unknown',
+    };
+    setAuditEntries(prev => [newAuditEntry, ...prev]);
+    
+    // Update SKU data
+    if (skuData) {
+      setSkuData(prev => {
+        if (!prev) return prev;
+        const field = prev[resolution.fieldName as keyof typeof prev];
+        if (typeof field === 'object' && field !== null && 'value' in field) {
+          return {
+            ...prev,
+            [resolution.fieldName]: {
+              ...field,
+              value: resolution.selectedValue,
+              status: 'verified' as const,
+              confidence: 95,
+            },
+          };
+        }
+        return prev;
+      });
+    }
+    
+    setActiveConflict(null);
+  }, [activeConflict, selectedJob, skuData]);
+
+  const addAuditEntry = useCallback((entry: Omit<AuditEntry, 'id' | 'timestamp'>) => {
+    const newEntry: AuditEntry = {
+      ...entry,
+      id: `audit-${Date.now()}`,
+      timestamp: new Date(),
+    };
+    setAuditEntries(prev => [newEntry, ...prev]);
+  }, []);
+
+  const removeBlocker = useCallback((blockerId: string) => {
+    setValidationBlockers(prev => prev.filter(b => b.id !== blockerId));
+  }, []);
+
   // Simulate real-time updates when a job is running
   useEffect(() => {
     if (!selectedJob || selectedJob.status !== 'running') return;
@@ -253,10 +441,19 @@ export function useMockData() {
     skuData,
     budgetData,
     isProcessing,
+    auditEntries,
+    systemConfig,
+    validationBlockers,
+    activeConflict,
     selectJob,
     createJob,
     getEvidence,
     getFilterCounts,
     setSkuData,
+    setSystemConfig,
+    triggerConflict,
+    resolveConflict,
+    addAuditEntry,
+    removeBlocker,
   };
 }
