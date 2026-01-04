@@ -8,10 +8,15 @@ import { AgentChatStream } from "@/components/workspace/AgentChatStream";
 import { SKUCard } from "@/components/workspace/SKUCard";
 import { WorkspaceToolbar } from "@/components/workspace/WorkspaceToolbar";
 import { EvidenceDrawer } from "@/components/workspace/EvidenceDrawer";
+import { ConflictResolutionModal } from "@/components/workspace/ConflictResolutionModal";
+import { ExportManager } from "@/components/export/ExportManager";
+import { AuditLogView } from "@/components/audit/AuditLogView";
+import { ConfigurationPanel } from "@/components/config/ConfigurationPanel";
 import { useMockData } from "@/hooks/useMockData";
 import type { JobStatus } from "@/types/job";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, Download } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { toast } from "sonner";
 
 export default function Index() {
@@ -22,6 +27,7 @@ export default function Index() {
     fieldName: '',
   });
   const [isPaused, setIsPaused] = useState(false);
+  const [workspaceTab, setWorkspaceTab] = useState<'enrichment' | 'export'>('enrichment');
 
   const {
     jobs,
@@ -30,11 +36,20 @@ export default function Index() {
     skuData,
     budgetData,
     isProcessing,
+    auditEntries,
+    systemConfig,
+    validationBlockers,
+    activeConflict,
     selectJob,
     createJob,
     getEvidence,
     getFilterCounts,
     setSkuData,
+    setSystemConfig,
+    triggerConflict,
+    resolveConflict,
+    addAuditEntry,
+    removeBlocker,
   } = useMockData();
 
   const filteredJobs = activeFilter === 'all' 
@@ -71,12 +86,31 @@ export default function Index() {
       return prev;
     });
     
+    // Add audit entry
+    if (selectedJob) {
+      addAuditEntry({
+        action: 'field_lock',
+        fieldName,
+        beforeValue: String(typeof field === 'object' && 'value' in field ? field.value : ''),
+        afterValue: String(typeof field === 'object' && 'value' in field ? field.value : ''),
+        userId: 'current-user',
+        jobId: selectedJob.id,
+      });
+    }
+    
     toast.success(`Field ${fieldName} ${isCurrentlyLocked ? 'unlocked' : 'locked'}`);
-  }, [skuData, setSkuData]);
+  }, [skuData, setSkuData, selectedJob, addAuditEntry]);
 
   const handleDecision = useCallback((messageId: string, decision: string) => {
-    toast.success(`Decision: ${decision} for message ${messageId}`);
-  }, []);
+    if (decision === 'accept') {
+      toast.success('Evidence accepted');
+    } else if (decision === 'select') {
+      // Trigger conflict resolution for demo
+      triggerConflict('dimensions');
+    } else {
+      toast.info('Question skipped');
+    }
+  }, [triggerConflict]);
 
   const handleVerifyHash = useCallback((evidenceId: string) => {
     toast.info('Verifying hash against live source...');
@@ -97,6 +131,26 @@ export default function Index() {
   const handleStop = useCallback(() => {
     toast.warning('Job stopped');
     setActiveView('dashboard');
+  }, []);
+
+  const handleRequestFix = useCallback((blockerId: string) => {
+    toast.info('Agent is searching for missing data...');
+    setTimeout(() => {
+      removeBlocker(blockerId);
+      toast.success('Blocker resolved by agent');
+    }, 2000);
+  }, [removeBlocker]);
+
+  const handleExport = useCallback((format: 'ozon_xml' | 'yandex_yml' | 'wildberries_csv') => {
+    return new Promise<void>((resolve) => {
+      setTimeout(() => {
+        resolve();
+      }, 1000);
+    });
+  }, []);
+
+  const handlePublish = useCallback(() => {
+    toast.success('Published to all channels successfully!');
   }, []);
 
   return (
@@ -135,7 +189,7 @@ export default function Index() {
 
         {activeView === 'workspace' && selectedJob && skuData && (
           <div className="h-full flex flex-col">
-            {/* Workspace Toolbar */}
+            {/* Workspace Header */}
             <div className="p-4 border-b bg-muted/30">
               <div className="flex items-center gap-4 max-w-7xl mx-auto">
                 <Button
@@ -147,40 +201,65 @@ export default function Index() {
                   <ArrowLeft className="w-4 h-4" />
                   Back
                 </Button>
-                <div className="flex-1">
+                
+                <Tabs value={workspaceTab} onValueChange={(v) => setWorkspaceTab(v as any)} className="flex-1">
+                  <TabsList>
+                    <TabsTrigger value="enrichment">Enrichment</TabsTrigger>
+                    <TabsTrigger value="export" className="gap-2">
+                      <Download className="w-4 h-4" />
+                      Export & Publish
+                    </TabsTrigger>
+                  </TabsList>
+                </Tabs>
+
+                {workspaceTab === 'enrichment' && (
                   <WorkspaceToolbar
                     cost={selectedJob.cost}
-                    costLimit={0.5}
+                    costLimit={systemConfig.budgetCaps.maxSpendPerSKU}
                     duration={selectedJob.duration}
-                    durationLimit={600}
+                    durationLimit={systemConfig.budgetCaps.maxExecutionTime}
                     onPause={handlePause}
                     onStop={handleStop}
                     isPaused={isPaused}
                   />
+                )}
+              </div>
+            </div>
+
+            {/* Workspace Content */}
+            {workspaceTab === 'enrichment' ? (
+              <div className="flex-1 flex overflow-hidden">
+                {/* Left Panel - Agent Chat (60%) */}
+                <div className="w-[60%] border-r overflow-hidden">
+                  <AgentChatStream
+                    messages={agentMessages}
+                    onDecision={handleDecision}
+                    isProcessing={isProcessing && !isPaused}
+                  />
+                </div>
+
+                {/* Right Panel - SKU Card (40%) */}
+                <div className="w-[40%] overflow-auto p-4 bg-muted/20">
+                  <SKUCard
+                    data={skuData}
+                    onViewEvidence={handleViewEvidence}
+                    onToggleLock={handleToggleLock}
+                  />
                 </div>
               </div>
-            </div>
-
-            {/* Split Screen */}
-            <div className="flex-1 flex overflow-hidden">
-              {/* Left Panel - Agent Chat (60%) */}
-              <div className="w-[60%] border-r overflow-hidden">
-                <AgentChatStream
-                  messages={agentMessages}
-                  onDecision={handleDecision}
-                  isProcessing={isProcessing && !isPaused}
-                />
+            ) : (
+              <div className="flex-1 overflow-auto p-6">
+                <div className="max-w-4xl mx-auto">
+                  <ExportManager
+                    skuId={selectedJob.id}
+                    blockers={validationBlockers}
+                    onRequestFix={handleRequestFix}
+                    onExport={handleExport}
+                    onPublish={handlePublish}
+                  />
+                </div>
               </div>
-
-              {/* Right Panel - SKU Card (40%) */}
-              <div className="w-[40%] overflow-auto p-4 bg-muted/20">
-                <SKUCard
-                  data={skuData}
-                  onViewEvidence={handleViewEvidence}
-                  onToggleLock={handleToggleLock}
-                />
-              </div>
-            </div>
+            )}
 
             {/* Evidence Drawer */}
             <EvidenceDrawer
@@ -190,24 +269,33 @@ export default function Index() {
               evidence={getEvidence(evidenceDrawer.fieldName)}
               onVerifyHash={handleVerifyHash}
             />
+
+            {/* Conflict Resolution Modal */}
+            <ConflictResolutionModal
+              isOpen={!!activeConflict}
+              onClose={() => resolveConflict({ 
+                fieldName: activeConflict?.fieldName || '', 
+                selectedValue: activeConflict?.claims[0]?.value || '', 
+                source: 'left' 
+              })}
+              conflict={activeConflict}
+              onResolve={resolveConflict}
+            />
           </div>
         )}
 
         {activeView === 'audit' && (
           <div className="p-6 max-w-7xl mx-auto">
-            <div className="text-center py-16 text-muted-foreground">
-              <h2 className="text-xl font-semibold mb-2">Audit Log</h2>
-              <p>Comprehensive activity log coming soon...</p>
-            </div>
+            <AuditLogView entries={auditEntries} />
           </div>
         )}
 
         {activeView === 'config' && (
-          <div className="p-6 max-w-7xl mx-auto">
-            <div className="text-center py-16 text-muted-foreground">
-              <h2 className="text-xl font-semibold mb-2">System Configuration</h2>
-              <p>Agent policies, budget caps, and LLM provider settings coming soon...</p>
-            </div>
+          <div className="p-6 max-w-5xl mx-auto">
+            <ConfigurationPanel 
+              config={systemConfig} 
+              onSave={setSystemConfig} 
+            />
           </div>
         )}
       </main>
